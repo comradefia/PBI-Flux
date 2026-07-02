@@ -1,6 +1,5 @@
 import React, { useState, useRef } from "react";
 import { Upload, FileCheck, Loader2, AlertCircle, Sparkles } from "lucide-react";
-import JSZip from "jszip";
 
 interface FileUploaderProps {
   onUploadSuccess: (reportId: string) => void;
@@ -25,146 +24,45 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
 
   const processFile = async (file: File) => {
     if (!file.name.endsWith(".pbix")) {
-      setError("Only prebuilt Power BI (.pbix) files are supported.");
+      setError("Only Microsoft Power BI prebuilt (.pbix) files are supported.");
       return;
     }
 
     setLoading(true);
     setError(null);
-    setStep("Loading file...");
+    setStep("Uploading Power BI file...");
+
+    const formData = new FormData();
+    formData.append("file", file);
 
     try {
-      setStep("Reading ZIP structure...");
-      const zip = await JSZip.loadAsync(file);
+      // Step-by-step progress simulation to delight the user
+      const steps = [
+        "Sending file package to secure workspace server...",
+        "Decompressing report archive...",
+        "Parsing Power BI Layout schema...",
+        "Synthesizing dynamic dataset via Gemini AI..."
+      ];
       
-      setStep("Locating Report Layout...");
-      const layoutFile = zip.file("Report/Layout");
-      if (!layoutFile) {
-        throw new Error("Invalid Power BI file structure. Could not locate 'Report/Layout' file inside the zipped package.");
-      }
-
-      setStep("Extracting layout data...");
-      const layoutBuffer = await layoutFile.async("uint8array");
+      let stepIndex = 0;
+      setStep(steps[0]);
       
-      setStep("Decoding UTF-16 content...");
-      const decoder = new TextDecoder("utf-16le");
-      const layoutText = decoder.decode(layoutBuffer);
-      
-      setStep("Parsing layout JSON...");
-      const layoutJson = JSON.parse(layoutText);
+      const progressInterval = setInterval(() => {
+        if (stepIndex < steps.length - 1) {
+          stepIndex++;
+          setStep(steps[stepIndex]);
+        }
+      }, 1200);
 
-      if (!layoutJson.sections || !Array.isArray(layoutJson.sections)) {
-        throw new Error("PBIX Layout file is missing sections.");
-      }
-
-      setStep("Mapping mobile visuals...");
-      // Filter out inactive sections and map visuals
-      const pages = layoutJson.sections
-        .filter((sec: any) => sec.config || sec.visualContainers)
-        .map((sec: any) => {
-          const visuals = (sec.visualContainers || [])
-            .filter((container: any) => {
-              // Skip pure backgrounds, shapes, and buttons that aren't charts
-              if (!container.config) return false;
-              try {
-                const cfg = JSON.parse(container.config);
-                return !!cfg.singleVisual;
-              } catch {
-                return false;
-              }
-            })
-            .map((container: any) => {
-              let config: any = {};
-              try {
-                config = JSON.parse(container.config || "{}");
-              } catch (e) {
-                // ignore
-              }
-
-              const singleVisual = config.singleVisual || {};
-              const visualType = singleVisual.visualType || "card";
-
-              // Determine Title
-              let title = "";
-              try {
-                const titleObj = singleVisual.objects?.title?.[0];
-                if (titleObj?.properties?.text?.expr?.Literal?.value) {
-                  title = titleObj.properties.text.expr.Literal.value;
-                } else if (titleObj?.properties?.text?.expr?.Resource?.value) {
-                  title = titleObj.properties.text.expr.Resource.value;
-                } else {
-                  title = `${visualType.replace("Chart", "")} Report`;
-                }
-              } catch {
-                title = `${visualType.charAt(0).toUpperCase() + visualType.slice(1)}`;
-              }
-
-              // Map visualType to our supported list
-              let mappedType: string = "card";
-              if (["barChart", "clusteredBarChart", "stackedBarChart"].includes(visualType)) {
-                mappedType = "barChart";
-              } else if (["columnChart", "clusteredColumnChart", "stackedColumnChart", "comboChart"].includes(visualType)) {
-                mappedType = "columnChart";
-              } else if (["lineChart"].includes(visualType)) {
-                mappedType = "lineChart";
-              } else if (["areaChart", "stackedAreaChart"].includes(visualType)) {
-                mappedType = "areaChart";
-              } else if (["pieChart"].includes(visualType)) {
-                mappedType = "pieChart";
-              } else if (["donutChart"].includes(visualType)) {
-                mappedType = "donutChart";
-              } else if (["card", "multiRowCard"].includes(visualType)) {
-                mappedType = "card";
-              } else if (["table", "matrix"].includes(visualType)) {
-                mappedType = "table";
-              } else if (["gauge"].includes(visualType)) {
-                mappedType = "gauge";
-              } else if (["slicer"].includes(visualType)) {
-                mappedType = "slicer";
-              } else if (["map", "filledMap"].includes(visualType)) {
-                mappedType = "map";
-              }
-
-              return {
-                id: container.id?.toString() || Math.random().toString(),
-                title: title,
-                type: mappedType,
-                x: container.x || 0,
-                y: container.y || 0,
-                width: container.width || 200,
-                height: container.height || 150,
-                queryFields: [],
-              };
-            });
-
-          return {
-            name: sec.name,
-            displayName: sec.displayName || "Report Sheet",
-            visuals: visuals,
-          };
-        })
-        .filter((page: any) => page.visuals.length > 0);
-
-      if (pages.length === 0) {
-        throw new Error("The uploaded Power BI file contains no active visual containers.");
-      }
-
-      setStep("Synthesizing dynamic dataset via Gemini AI...");
-      const reportName = file.name.replace(".pbix", "");
-
-      const response = await fetch("/api/reports/create", {
+      const response = await fetch("/api/upload", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          name: reportName,
-          pages: pages,
-        }),
+        body: formData,
       });
 
+      clearInterval(progressInterval);
+
       if (!response.ok) {
-        let errorMsg = "Failed to compile the mobile dashboard.";
+        let errorMsg = "Failed to process the report file.";
         try {
           const contentType = response.headers.get("content-type");
           if (contentType && contentType.includes("application/json")) {
@@ -175,7 +73,7 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
             errorMsg = `Server error (${response.status}): ${text.substring(0, 100)}`;
           }
         } catch (e) {
-          errorMsg = `Server error code ${response.status}`;
+          errorMsg = `Server returned error status ${response.status}`;
         }
         throw new Error(errorMsg);
       }

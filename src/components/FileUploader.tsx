@@ -46,11 +46,30 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
         body: formData,
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || "Failed to process the report file.");
+        let errorMsg = "Failed to process the report file.";
+        try {
+          const contentType = response.headers.get("content-type");
+          if (contentType && contentType.includes("application/json")) {
+            const data = await response.json();
+            errorMsg = data.error || errorMsg;
+          } else {
+            const text = await response.text();
+            if (response.status === 413) {
+              errorMsg = "The file is too large (maximum size limit is 50MB). Please upload a smaller .pbix file.";
+            } else if (response.status === 404) {
+              errorMsg = "The upload endpoint could not be found on the server. Please check your dev server configuration.";
+            } else {
+              errorMsg = `Server error (${response.status}): ${text.substring(0, 100)}`;
+            }
+          }
+        } catch (e) {
+          errorMsg = `Server returned error status ${response.status}`;
+        }
+        throw new Error(errorMsg);
       }
+
+      const data = await response.json();
 
       setStep("Mobile Dashboard Compiled Successfully!");
       setTimeout(() => {

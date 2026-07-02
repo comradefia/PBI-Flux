@@ -669,6 +669,14 @@ Please return ONLY a valid, raw JSON object (with no markdown block quotes, no b
   }
 });
 
+// Custom Express Error Handler to prevent HTML output on errors
+app.use((err: any, req: any, res: any, next: any) => {
+  console.error("Global Server Error Handling:", err);
+  res.status(err.status || err.statusCode || 500).json({
+    error: err.message || "An unexpected server error occurred during processing",
+  });
+});
+
 // Start Server Setup with Vite integration
 async function startServer() {
   // Vite integration

@@ -14,6 +14,18 @@ const PORT = 3000;
 
 app.use(express.json());
 
+// Log all incoming requests to console and to server.log file
+app.use((req, res, next) => {
+  const logLine = `[${new Date().toISOString()}] ${req.method} ${req.url} - Content-Type: ${req.headers["content-type"] || "none"}\n`;
+  console.log(logLine.trim());
+  try {
+    fs.appendFileSync(path.join(process.cwd(), "server.log"), logLine);
+  } catch (e) {
+    // ignore
+  }
+  next();
+});
+
 // Set up file uploads using multer in memory
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -450,8 +462,129 @@ app.post("/api/reports/:id/refresh", (req, res) => {
   res.json({ success: true, report: report });
 });
 
+// PBIX File Upload GET endpoint for debugging
+app.get("/api/upload", (req, res) => {
+  res.json({ message: "Upload GET is active! POST is also registered on this path." });
+});
+
+// Endpoint to create a report directly from a client-side parsed layout
+app.post("/api/reports/create", async (req, res) => {
+  const { name: reportName, pages } = req.body;
+
+  if (!reportName || !pages || !Array.isArray(pages)) {
+    return res.status(400).json({ error: "Invalid report data. Please provide 'name' and 'pages'." });
+  }
+
+  if (pages.length === 0) {
+    return res.status(400).json({ error: "The report contains no active visual containers." });
+  }
+
+  try {
+    const reportId = "uploaded_" + Date.now();
+
+    // Prepare metadata summary to feed to Gemini
+    const reportPagesSummary = pages.map((page: any) => ({
+      pageName: page.displayName,
+      visuals: page.visuals.map((v: any) => ({ id: v.id, title: v.title, type: v.type })),
+    }));
+
+    // Trigger AI Data Modeling using Gemini API if configured
+    let reportData = { datasets: {}, slicers: {} };
+    let aiTriggered = false;
+
+    const ai = getAiClient();
+    if (ai) {
+      try {
+        const geminiPrompt = `
+You are a Power BI report data generator. I have uploaded a .pbix file, and successfully extracted its layout metadata.
+The report name is: "${reportName}".
+Here is the extracted layout structure of pages and visual containers:
+${JSON.stringify(reportPagesSummary, null, 2)}
+
+Your task is to generate realistic, coherent, and highly interactive mock datasets for EVERY visual container ID listed in this report.
+The datasets must be:
+1. Numerically and logically coherent: If the report contains sales visuals and region slicers, the sales numbers must align across cards, charts, and tables.
+2. Formatted for chart display:
+   - For 'barChart' or 'columnChart', return an array of objects representing categories and numeric values. E.g., [{"Category": "A", "Value": 100}, {"Category": "B", "Value": 150}]
+   - For 'lineChart' or 'areaChart', return an array of objects representing points over time (e.g. Days, Months, or Timestamps) and metrics. E.g., [{"Time": "Jan", "Sales": 200, "Profit": 180}, ...]
+   - For 'pieChart' or 'donutChart', return an array of categories and values. E.g., [{"name": "Online", "value": 450}, ...]
+   - For 'card' or 'gauge', return a single-object array with a 'value' property. E.g., [{"value": 124500}]
+   - For 'table', return an array of multiple objects representing rows of a data grid, with descriptive columns. E.g., [{"Product": "Gadget A", "Sales": 5000, "Refunds": 120}]
+   - For 'map', return an array of geographical locations with name, lat, lng, and value. E.g., [{"city": "New York", "lat": 40.7128, "lng": -74.0060, "value": 52000}]
+3. Create slicer configurations for any 'slicer' visual container ID, defining the filter 'column' name, and list of 'options' (string values). E.g. {"column": "Region", "options": ["North", "South", "East", "West"]}.
+
+Please return ONLY a valid, raw JSON object (with no markdown block quotes, no backticks, no explanatory text, starting with { and ending with }) conforming to the following structure:
+{
+  "datasets": {
+    "visual_container_id_1": [ { "Category": "..." , "Value": 123 }, ... ],
+    "visual_container_id_2": [ { "value": 450000 } ]
+  },
+  "slicers": {
+    "slicer_visual_id_1": { "column": "Product Category", "options": ["Electronics", "Apparel", "Home"] }
+  }
+}
+`;
+
+        const response = await ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: geminiPrompt,
+          config: {
+            responseMimeType: "application/json",
+          },
+        });
+
+        const textResponse = response.text || "";
+        const cleanedResponse = textResponse.replace(/```json/g, "").replace(/```/g, "").trim();
+        const parsedAiData = JSON.parse(cleanedResponse);
+
+        if (parsedAiData.datasets) {
+          reportData.datasets = parsedAiData.datasets;
+          reportData.slicers = parsedAiData.slicers || {};
+          aiTriggered = true;
+        }
+      } catch (aiError) {
+        console.error("Gemini dataset synthesis failed, falling back to local model: ", aiError);
+      }
+    }
+
+    // Fallback to local heuristic data generation if Gemini isn't loaded or fails
+    if (!aiTriggered) {
+      const fallback = generateFallbackDatasets(pages);
+      reportData.datasets = fallback.datasets;
+      reportData.slicers = fallback.slicers;
+    }
+
+    // Save report in-memory database
+    reportsDb[reportId] = {
+      id: reportId,
+      name: `📊 ${reportName}`,
+      pages: pages,
+      datasets: reportData.datasets,
+      slicers: reportData.slicers as any,
+      createdAt: new Date().toISOString(),
+      isCustomUpload: true,
+    };
+
+    res.json({
+      success: true,
+      reportId: reportId,
+      name: reportName,
+      pagesCount: pages.length,
+      aiGenerated: aiTriggered,
+    });
+  } catch (error: any) {
+    const createErrorLog = `[${new Date().toISOString()}] CREATE REPORT EXCEPTION: ${error.message || error}\n${error.stack || ""}\n`;
+    try {
+      fs.appendFileSync(path.join(process.cwd(), "server.log"), createErrorLog);
+    } catch (e) {}
+    console.error("Report creation error: ", error);
+    res.status(500).json({ error: "Failed to create report. " + error.message });
+  }
+});
+
 // PBIX File Upload and layout/schema extraction endpoint
 app.post("/api/upload", upload.single("file"), async (req, res) => {
+  console.log(`[UPLOAD API] Received file upload request. File: ${req.file ? req.file.originalname : "none"}, Size: ${req.file ? req.file.size : 0} bytes`);
   if (!req.file) {
     return res.status(400).json({ error: "No file was uploaded." });
   }
@@ -664,6 +797,10 @@ Please return ONLY a valid, raw JSON object (with no markdown block quotes, no b
       aiGenerated: aiTriggered,
     });
   } catch (error: any) {
+    const uploadErrorLog = `[${new Date().toISOString()}] UPLOAD EXCEPTION: ${error.message || error}\n${error.stack || ""}\n`;
+    try {
+      fs.appendFileSync(path.join(process.cwd(), "server.log"), uploadErrorLog);
+    } catch (e) {}
     console.error("PBIX upload and processing error: ", error);
     res.status(500).json({ error: "Failed to process the Power BI report file. " + error.message });
   }
@@ -671,7 +808,13 @@ Please return ONLY a valid, raw JSON object (with no markdown block quotes, no b
 
 // Custom Express Error Handler to prevent HTML output on errors
 app.use((err: any, req: any, res: any, next: any) => {
+  const errorMsg = `[${new Date().toISOString()}] ERROR: ${err.message || err}\n${err.stack || ""}\n`;
   console.error("Global Server Error Handling:", err);
+  try {
+    fs.appendFileSync(path.join(process.cwd(), "server.log"), errorMsg);
+  } catch (e) {
+    // ignore
+  }
   res.status(err.status || err.statusCode || 500).json({
     error: err.message || "An unexpected server error occurred during processing",
   });

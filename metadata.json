@@ -1,0 +1,6 @@
+{
+  "name": "Power BI Mobile Viewer",
+  "description": "Upload prebuilt Power BI files (.pbix) to view and interact with reports on a mobile responsive dashboard, featuring simulated and real-time live data refreshes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
